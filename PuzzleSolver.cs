@@ -34,6 +34,9 @@ public partial class PuzzleSolver : Control
 	private const byte VK_A = 0x41; private const byte VK_D = 0x44;
 
 	private SpinBox[] _spinBoxes;
+	private HBoxContainer[] _startPositionRows;
+	private CheckBox[,] _startPositionButtons;
+	private bool _isSyncingStartPositionUi = false;
 	private SpinBox _cellCountInput;
 	private LineEdit _rulesInput;
 	private Button _calcButton;
@@ -41,10 +44,17 @@ public partial class PuzzleSolver : Control
 	private SpinBox _startDelayInput;
 	private ScrollContainer _scrollContainer;
 	private Label _resultLabel;
+	private ScrollContainer _linkMatrixScroll;
+	private GridContainer _linkMatrixGrid;
+	private Label _linkMatrixTitle;
+	private Button[,] _linkButtons;
 
 	private readonly string[] _names = { "A", "B", "C", "D", "E", "F", "G", "H" };
 	private int[,] _dependencyMatrix = new int[8, 8];
+	private int[,] _linkMatrix = new int[8, 8];
 	private List<Tuple<int, int>> _cachedSteps = null;
+	private bool _isSyncingRulesText = false;
+	private bool _isSyncingMatrix = false;
 
 	// === ПЕРЕМЕННЫЕ ДЛЯ ЭКСТРЕННОЙ ОСТАНОВКИ ===
 	private CancellationTokenSource _cts = null;
@@ -65,6 +75,7 @@ public partial class PuzzleSolver : Control
 		_spinBoxes[5] = GetNode<SpinBox>("VBoxContainer/GridContainer/F");
 		_spinBoxes[6] = GetNode<SpinBox>("VBoxContainer/GridContainer/G");
 		_spinBoxes[7] = GetNode<SpinBox>("VBoxContainer/GridContainer/H");
+		BuildStartPositionSelector();
 
 		// (Остальной код инициализации кнопок, лейблов и задержек ниже остается без изменений...)
 		_cellCountInput = GetNode<SpinBox>("VBoxContainer/HBoxContainer/CellCountInput");
@@ -78,9 +89,14 @@ public partial class PuzzleSolver : Control
 		_calcButton.Pressed += OnCalculatePressed;
 		_autoplayButton.Pressed += OnAutoplayPressed;
 		_cellCountInput.ValueChanged += OnCellCountChanged;
+		_rulesInput.TextChanged += OnRulesTextChanged;
 
+		_cellCountInput.Value = 6;
 		UpdateVisibleSpinBoxes((int)_cellCountInput.Value);
-		_rulesInput.Text = "A:B+; B:C+; C:A+";
+		SetDefaultStartPositions();
+		BuildLinkMatrixEditor();
+		SetDefaultLinkMatrix((int)_cellCountInput.Value);
+		SyncRulesTextFromLinkMatrix();
 
 		// 📄 ЛОГИКА РАБОТЫ С INI-ФАЙЛОМ НАСТРОЕК
 		var config = new ConfigFile();
@@ -106,6 +122,357 @@ public partial class PuzzleSolver : Control
 
 		// Разрешаем текстовому полю динамически увеличивать свою высоту при переносе строк
 		_resultLabel.SizeFlagsVertical = Control.SizeFlags.ExpandFill;
+	}
+
+	private void BuildStartPositionSelector()
+	{
+		var grid = GetNode<GridContainer>("VBoxContainer/GridContainer");
+		grid.Columns = 1;
+		grid.AddThemeConstantOverride("h_separation", 0);
+		grid.AddThemeConstantOverride("v_separation", 1);
+
+		_startPositionRows = new HBoxContainer[8];
+		_startPositionButtons = new CheckBox[8, 7];
+		ButtonGroup[] groups = new ButtonGroup[8];
+
+		for (int i = 0; i < _spinBoxes.Length; i++)
+		{
+			if (_spinBoxes[i] == null) continue;
+
+			_spinBoxes[i].Visible = false;
+			int capturedIndex = i;
+			_spinBoxes[i].ValueChanged += _ => SyncStartPositionRowFromValue(capturedIndex);
+			groups[i] = new ButtonGroup();
+		}
+
+		for (int slotIndex = _spinBoxes.Length - 1; slotIndex >= 0; slotIndex--)
+		{
+			HBoxContainer row = new HBoxContainer();
+			row.SizeFlagsHorizontal = Control.SizeFlags.ShrinkBegin;
+			row.CustomMinimumSize = new Vector2(0, 28);
+			row.AddThemeConstantOverride("separation", 1);
+
+			Label label = new Label();
+			label.Text = $"П{slotIndex + 1}";
+			label.CustomMinimumSize = new Vector2(28, 0);
+			label.HorizontalAlignment = HorizontalAlignment.Center;
+			label.VerticalAlignment = VerticalAlignment.Center;
+			row.AddChild(label);
+
+			for (int value = 0; value <= 6; value++)
+			{
+				int capturedSlot = slotIndex;
+				int capturedValue = value;
+				CheckBox button = new CheckBox();
+				button.Text = "";
+				button.TooltipText = value.ToString();
+				button.ButtonGroup = groups[slotIndex];
+				button.CustomMinimumSize = new Vector2(28, 0);
+				button.SizeFlagsHorizontal = Control.SizeFlags.ShrinkBegin;
+				button.Pressed += () => SetStartPositionValue(capturedSlot, capturedValue);
+				row.AddChild(button);
+				_startPositionButtons[slotIndex, value] = button;
+			}
+
+			_startPositionRows[slotIndex] = row;
+			grid.AddChild(row);
+		}
+
+		for (int i = 0; i < _spinBoxes.Length; i++)
+			SyncStartPositionRowFromValue(i);
+	}
+
+	private void SetStartPositionValue(int slotIndex, int value)
+	{
+		if (_isSyncingStartPositionUi || slotIndex < 0 || slotIndex >= _spinBoxes.Length || _spinBoxes[slotIndex] == null)
+			return;
+
+		_spinBoxes[slotIndex].Value = value;
+		SyncStartPositionRowFromValue(slotIndex);
+	}
+
+	private void SyncStartPositionRowFromValue(int slotIndex)
+	{
+		if (_startPositionButtons == null || slotIndex < 0 || slotIndex >= _spinBoxes.Length || _spinBoxes[slotIndex] == null)
+			return;
+
+		int value = Math.Clamp((int)_spinBoxes[slotIndex].Value, 0, 6);
+		_isSyncingStartPositionUi = true;
+
+		for (int i = 0; i <= 6; i++)
+		{
+			CheckBox button = _startPositionButtons[slotIndex, i];
+			if (button != null) button.ButtonPressed = i == value;
+		}
+
+		_isSyncingStartPositionUi = false;
+	}
+
+	private void BuildLinkMatrixEditor()
+	{
+		var parent = GetNode<VBoxContainer>("VBoxContainer");
+		int insertIndex = _rulesInput.GetIndex();
+
+		Label title = new Label();
+		title.Text = TranslationServer.Translate("KEY_LINKS_TITLE");
+		title.AutowrapMode = TextServer.AutowrapMode.WordSmart;
+		parent.AddChild(title);
+		parent.MoveChild(title, insertIndex);
+		_linkMatrixTitle = title;
+
+		_linkMatrixScroll = new ScrollContainer();
+		_linkMatrixScroll.CustomMinimumSize = new Vector2(0, 350);
+		_linkMatrixScroll.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
+		parent.AddChild(_linkMatrixScroll);
+		parent.MoveChild(_linkMatrixScroll, insertIndex + 1);
+
+		_linkMatrixGrid = new GridContainer();
+		_linkMatrixGrid.Columns = 9;
+		_linkMatrixGrid.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
+		_linkMatrixScroll.AddChild(_linkMatrixGrid);
+
+		_linkButtons = new Button[8, 8];
+		RebuildLinkMatrixGrid((int)_cellCountInput.Value);
+	}
+
+	private void RebuildLinkMatrixGrid(int activeCount)
+	{
+		if (_linkMatrixGrid == null) return;
+
+		List<Node> oldChildren = new List<Node>();
+		foreach (Node child in _linkMatrixGrid.GetChildren())
+			oldChildren.Add(child);
+
+		foreach (Node child in oldChildren)
+		{
+			_linkMatrixGrid.RemoveChild(child);
+			child.QueueFree();
+		}
+
+		_linkMatrixGrid.Columns = activeCount + 1;
+		AddMatrixHeader("");
+
+		for (int col = 0; col < activeCount; col++)
+			AddMatrixHeader($"П{col + 1}");
+
+		for (int displayRow = activeCount - 1; displayRow >= 0; displayRow--)
+		{
+			int row = displayRow;
+			AddMatrixHeader($"П{row + 1} ->");
+
+			for (int col = 0; col < activeCount; col++)
+			{
+				int capturedRow = row;
+				int capturedCol = col;
+				Button btn = new Button();
+				btn.CustomMinimumSize = new Vector2(78, 34);
+				btn.ClipText = true;
+				btn.Disabled = row == col;
+				btn.Pressed += () => ToggleLinkCell(capturedRow, capturedCol);
+				_linkButtons[row, col] = btn;
+				_linkMatrixGrid.AddChild(btn);
+			}
+		}
+
+		RefreshLinkButtons(activeCount);
+	}
+
+	private void AddMatrixHeader(string text)
+	{
+		Label label = new Label();
+		label.Text = text;
+		label.HorizontalAlignment = HorizontalAlignment.Center;
+		label.VerticalAlignment = VerticalAlignment.Center;
+		label.CustomMinimumSize = new Vector2(78, 24);
+		_linkMatrixGrid.AddChild(label);
+	}
+
+	private void ToggleLinkCell(int row, int col)
+	{
+		if (row == col) return;
+
+		// Cycle like the HTML version: none -> together -> opposite -> none.
+		_linkMatrix[row, col] = _linkMatrix[row, col] == 0 ? 1 : (_linkMatrix[row, col] == 1 ? -1 : 0);
+		RefreshLinkButtons((int)_cellCountInput.Value);
+		SyncRulesTextFromLinkMatrix();
+	}
+
+	private void RefreshLinkButtons(int activeCount)
+	{
+		for (int row = 0; row < activeCount; row++)
+		{
+			for (int col = 0; col < activeCount; col++)
+			{
+				Button btn = _linkButtons[row, col];
+				if (btn == null) continue;
+
+				// Diagonal cells are always blocked and shown as "ВМЕСТЕ".
+				int state = row == col ? 1 : _linkMatrix[row, col];
+				if (state == 1)
+					btn.Text = TranslationServer.Translate("KEY_LINK_TOGETHER");
+				else if (state == -1)
+					btn.Text = TranslationServer.Translate("KEY_LINK_OPPOSITE");
+				else
+					btn.Text = TranslationServer.Translate("KEY_LINK_NONE");
+
+				btn.TooltipText = row == col
+					? TranslationServer.Translate("KEY_LINK_TOOLTIP_DIAG")
+					: TranslationServer.Translate("KEY_LINK_TOOLTIP_CLICK");
+
+				btn.RemoveThemeColorOverride("font_color");
+				btn.RemoveThemeColorOverride("font_disabled_color");
+				if (state == 1)
+				{
+						btn.AddThemeColorOverride(row == col ? "font_disabled_color" : "font_color", new Color(0.45f, 1.0f, 0.55f));
+				}
+				else if (state == -1)
+				{
+					btn.AddThemeColorOverride("font_color", new Color(1.0f, 0.45f, 0.45f));
+				}
+			}
+		}
+	}
+
+	public void RefreshLinkMatrixTranslations()
+	{
+		if (_linkMatrixTitle != null)
+			_linkMatrixTitle.Text = TranslationServer.Translate("KEY_LINKS_TITLE");
+
+		if (_cellCountInput != null)
+			RefreshLinkButtons((int)_cellCountInput.Value);
+	}
+
+	private void SetDefaultLinkMatrix(int activeCount)
+	{
+		Array.Clear(_linkMatrix, 0, _linkMatrix.Length);
+		for (int i = 0; i < activeCount; i++)
+			_linkMatrix[i, i] = 1;
+
+		if (activeCount == 6)
+		{
+			_linkMatrix[1, 3] = -1;
+			_linkMatrix[2, 1] = -1;
+			_linkMatrix[2, 3] = -1;
+			_linkMatrix[2, 4] = -1;
+			_linkMatrix[3, 4] = -1;
+			_linkMatrix[4, 0] = 1;
+			_linkMatrix[4, 1] = -1;
+			_linkMatrix[4, 3] = -1;
+			_linkMatrix[5, 3] = -1;
+		}
+
+		RefreshLinkButtons(activeCount);
+	}
+
+	public void ResetAllLinks()
+	{
+		// Clear all non-diagonal links to 0 ("НЕТ") and ensure diagonal stays as 1 (blocked)
+		Array.Clear(_linkMatrix, 0, _linkMatrix.Length);
+		int activeCount = (int)_cellCountInput.Value;
+		for (int i = 0; i < activeCount; i++)
+		{
+			_linkMatrix[i, i] = 1;
+		}
+		RefreshLinkButtons(activeCount);
+		SyncRulesTextFromLinkMatrix();
+	}
+
+	private void SetDefaultStartPositions()
+	{
+		int[] htmlPositionsConvertedToSolver = { 1, 2, 3, 5, 5, 6 };
+		for (int i = 0; i < htmlPositionsConvertedToSolver.Length && i < _spinBoxes.Length; i++)
+		{
+			_spinBoxes[i].Value = htmlPositionsConvertedToSolver[i];
+			SyncStartPositionRowFromValue(i);
+		}
+	}
+
+	private void SyncRulesTextFromLinkMatrix()
+	{
+		if (_isSyncingMatrix) return;
+
+		_isSyncingRulesText = true;
+		int activeCount = (int)_cellCountInput.Value;
+		StringBuilder sb = new StringBuilder();
+
+		for (int row = 0; row < activeCount; row++)
+		{
+			List<string> targets = new List<string>();
+			for (int col = 0; col < activeCount; col++)
+			{
+				if (row == col) continue;
+
+				int state = _linkMatrix[row, col];
+				if (state == 1) targets.Add($"{_names[col]}+");
+				else if (state == -1) targets.Add($"{_names[col]}-");
+			}
+
+			if (targets.Count > 0)
+			{
+				if (sb.Length > 0) sb.Append("; ");
+				sb.Append(_names[row]).Append(":").Append(string.Join(",", targets));
+			}
+		}
+
+		_rulesInput.Text = sb.ToString();
+		_isSyncingRulesText = false;
+	}
+
+	private void OnRulesTextChanged(string newText)
+	{
+		if (_isSyncingRulesText) return;
+		SyncLinkMatrixFromRulesText(newText);
+	}
+
+	public void LoadRulesFromDatabase(string rulesText)
+	{
+		_rulesInput.Text = rulesText;
+		SyncLinkMatrixFromRulesText(rulesText);
+	}
+
+	private void SyncLinkMatrixFromRulesText(string rulesText)
+	{
+		if (_linkMatrixGrid == null) return;
+
+		_isSyncingMatrix = true;
+		int activeCount = (int)_cellCountInput.Value;
+		Array.Clear(_linkMatrix, 0, _linkMatrix.Length);
+		for (int i = 0; i < activeCount; i++)
+			_linkMatrix[i, i] = 1;
+
+		try
+		{
+			string cleanText = rulesText.Replace(" ", "").ToUpper();
+			string[] commands = cleanText.Split(';', StringSplitOptions.RemoveEmptyEntries);
+
+			foreach (string cmd in commands)
+			{
+				string[] parts = cmd.Split(':');
+				if (parts.Length != 2) continue;
+
+				int sourceIdx = GetLetterNameIndex(parts[0]);
+				if (sourceIdx < 0 || sourceIdx >= activeCount) continue;
+
+				string[] targets = parts[1].Split(',', StringSplitOptions.RemoveEmptyEntries);
+				foreach (string target in targets)
+				{
+					if (target.Length < 2) continue;
+
+					string targetLetter = target.Substring(0, target.Length - 1);
+					char sign = target[target.Length - 1];
+					int targetIdx = GetLetterNameIndex(targetLetter);
+					if (targetIdx < 0 || targetIdx >= activeCount || sourceIdx == targetIdx) continue;
+
+					if (sign == '+') _linkMatrix[sourceIdx, targetIdx] = 1;
+					else if (sign == '-') _linkMatrix[sourceIdx, targetIdx] = -1;
+				}
+			}
+		}
+		finally
+		{
+			RefreshLinkButtons(activeCount);
+			_isSyncingMatrix = false;
+		}
 	}
 
 	private void SimulateKeyPress(byte keyCode)
@@ -137,7 +504,7 @@ public partial class PuzzleSolver : Control
 
 		// Включаем режим работы автоплея
 		_isAutoplayRunning = true;
-		_autoplayButton.Text = "[ STOP AUTO-PLAY ]";
+		_autoplayButton.Text = TranslationServer.Translate("KEY_STOP_AUTOPLAY");
 		_autoplayButton.AddThemeColorOverride("font_color", new Color(1, 0.3f, 0.3f)); // Красный текст кнопки
 
 		// Создаем новый токен отмены для этой сессии
@@ -261,7 +628,7 @@ public partial class PuzzleSolver : Control
 	private void ResetAutoplayButtonState()
 	{
 		_isAutoplayRunning = false;
-		_autoplayButton.Text = "Run auto-play";
+		_autoplayButton.Text = TranslationServer.Translate("KEY_AUTOPLAY");
 		_autoplayButton.RemoveThemeColorOverride("font_color"); // Возвращаем дефолтный цвет текста
 		_cts?.Dispose();
 		_cts = null;
@@ -324,7 +691,7 @@ public partial class PuzzleSolver : Control
 	{
 		// Полностью очищаем матрицу перед новым расчетом
 		Array.Clear(_dependencyMatrix, 0, _dependencyMatrix.Length);
-		if (string.IsNullOrWhiteSpace(rulesText)) return "ERROR: Rules string is empty.";
+		if (string.IsNullOrWhiteSpace(rulesText)) return null;
 
 		try
 		{
@@ -450,12 +817,25 @@ public partial class PuzzleSolver : Control
 		return hash;
 	}
 
-	private void OnCellCountChanged(double value) => UpdateVisibleSpinBoxes((int)value);
+	private void OnCellCountChanged(double value)
+	{
+		int count = (int)value;
+		UpdateVisibleSpinBoxes(count);
+
+		for (int i = 0; i < _linkMatrix.GetLength(0); i++)
+			_linkMatrix[i, i] = i < count ? 1 : 0;
+
+		RebuildLinkMatrixGrid(count);
+		SyncRulesTextFromLinkMatrix();
+	}
 
 	private void UpdateVisibleSpinBoxes(int count)
 	{
 		for (int i = 0; i < _spinBoxes.Length; i++)
-			if (_spinBoxes[i] != null) _spinBoxes[i].Visible = (i < count);
+		{
+			if (_spinBoxes[i] != null) _spinBoxes[i].Visible = false;
+			if (_startPositionRows != null && _startPositionRows[i] != null) _startPositionRows[i].Visible = (i < count);
+		}
 	}
 
 	private void UpdateStartPos(int count, string startPos)
@@ -475,6 +855,7 @@ public partial class PuzzleSolver : Control
 				if (double.TryParse(pos[i], CultureInfo.InvariantCulture, out double value))
 				{
 					_spinBoxes[i].Value = value;
+					SyncStartPositionRowFromValue(i);
 				}
 			}
 		}

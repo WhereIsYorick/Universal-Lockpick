@@ -8,11 +8,24 @@ public partial class MapManager : Node
 	private const string SETTINGS_INI_PATH = "user://settings.ini"; // Файл настроек программы
 
 	private LineEdit _searchField;
+	private LineEdit _chestDescriptionInput;
 	private GridContainer _chestGrid;
+	private GridContainer _chestGridFull;
+	private GridContainer _chestGridAlmost;
+	private Label _labelFull;
+	private Label _labelAlmost;
 	private Button _contributeButton;
+	private Button _resetButton;
+	private Button _resetLinksButton;
 	private OptionButton _langSelector; // Выпадающий список языков
 	private Button _helpButton;         // Кнопка "?"
 	private AcceptDialog _helpWindow;   // Окно справки
+
+	private const string CONTRIBUTE_FORM_URL = "https://docs.google.com/forms/d/e/1FAIpQLSfmbioj1F5C-LMalOMSWay6Ba8B5y2ori4qH20JDPiNXdx0UA/viewform";
+	private const string FORM_ENTRY_CHEST_DESCRIPTION = "entry.1484895692";
+	private const string FORM_ENTRY_CELL_COUNT = "entry.1053036920";
+	private const string FORM_ENTRY_START_POS = "entry.807992425";
+	private const string FORM_ENTRY_RULES = "entry.1620143823";
 
 	// Ссылки на поля левого калькулятора для заполнения данными
 	private SpinBox _cellCountInput;
@@ -27,6 +40,27 @@ public partial class MapManager : Node
 		public string Rules;
 		public string StartPos;
 		public List<string> SearchTags;
+	}
+
+	private void OnResetButtonPressed()
+	{
+		// Reset inputs to defaults
+		_cellCountInput.Value = 3;
+		_rulesInput.Text = string.Empty;
+		for (int i = 0; i < _mainSpinBoxes.Length; i++)
+		{
+			_mainSpinBoxes[i].Value = 0;
+		}
+		// Refresh list
+		FilterAndGenerateButtons(_searchField.Text);
+	}
+
+	private void OnResetLinksButtonPressed()
+	{
+		// Ask PuzzleSolver (root node) to reset all links to 'НЕТ'
+		var rootNode = GetTree().Root.GetChild(0);
+		rootNode.Call("ResetAllLinks");
+		FilterAndGenerateButtons(_searchField.Text);
 	}
 
 	private List<ChestConfig> _database = new List<ChestConfig>();
@@ -49,7 +83,12 @@ public partial class MapManager : Node
 	public override void _Ready()
 	{
 		_searchField = GetNode<LineEdit>("SearchField");
-		_chestGrid = GetNode<GridContainer>("ScrollContainer/ChestGrid");
+		_chestDescriptionInput = GetNode<LineEdit>("ChestDescriptionInput");
+		// New separate containers for full and partial matches (created in scene)
+		_chestGridFull = GetNode<GridContainer>("ScrollContainer/BoxContainer/ChestGrid_full");
+		_chestGridAlmost = GetNode<GridContainer>("ScrollContainer/BoxContainer/ChestGrid_almost");
+		_labelFull = GetNode<Label>("ScrollContainer/BoxContainer/Label_full");
+		_labelAlmost = GetNode<Label>("ScrollContainer/BoxContainer/Label_almost");
 		_contributeButton = GetNode<Button>("ContributeButton");
 
 		// ИСПРАВЛЕНО: Поднимаемся на уровень вверх (к корню Control) и заходим в левый VBoxContainer
@@ -77,6 +116,19 @@ public partial class MapManager : Node
 		_mainSpinBoxes[6] = GetNode<SpinBox>("../VBoxContainer/GridContainer/G");
 		_mainSpinBoxes[7] = GetNode<SpinBox>("../VBoxContainer/GridContainer/H");
 
+		// Слушатели, чтобы при изменении селектора числа ячеек и стартовых позиций список обновлялся
+		_cellCountInput.ValueChanged += OnCellCountValueChanged;
+		for (int i = 0; i < _mainSpinBoxes.Length; i++)
+		{
+			_mainSpinBoxes[i].ValueChanged += OnStartPositionValueChanged;
+		}
+
+		// Reset button (clear inputs) — aligned to the far right in the row
+		_resetButton = GetNode<Button>("../VBoxContainer/HBoxContainer/ResetButton");
+		_resetButton.Pressed += OnResetButtonPressed;
+		_resetLinksButton = GetNode<Button>("../VBoxContainer/HBoxContainer2/ResetLinksButton");
+		_resetLinksButton.Pressed += OnResetLinksButtonPressed;
+
 		// Заполнение выпадающего списка языков
 		_langSelector.AddItem("English (EN)", 0);
 		_langSelector.AddItem("Русский (RU)", 1);
@@ -89,9 +141,7 @@ public partial class MapManager : Node
 		_langSelector.ItemSelected += OnLanguageSelected;
 		_helpButton.Pressed += OnHelpButtonPressed;
 
-		_contributeButton.Pressed += () => {
-			OS.ShellOpen("https://forms.gle/LtRSy7YnkKLxsHATA");
-		};
+		_contributeButton.Pressed += OnContributeButtonPressed;
 
 		// Настройка встроенных языковых пакетов Godot (Задаем переводы для ключей KEY_...)
 		SetupTranslationServer();
@@ -99,6 +149,13 @@ public partial class MapManager : Node
 		// Загрузка сохраненного языка из настроек и запуск базы
 		LoadSavedLanguage();
 		LoadIniDatabase();
+
+		// Применяем переводы к статическим элементам сцены
+		ApplyTranslationsToScene();
+
+		// Apply translation to static buttons that use KEY_ placeholders in the scene
+		_resetButton.Text = TranslationServer.Translate("KEY_RESET_CELLS");
+		_resetLinksButton.Text = TranslationServer.Translate("KEY_RESET_LINKS");
 	}
 
 	private void SetupTranslationServer()
@@ -196,16 +253,83 @@ public partial class MapManager : Node
 	};
 
 		var auto = new[] { "Run auto-play", "Запустить авто-гру", "Uruchom auto-grę", "Auto-Play starten", "Запустити авто-гру" };
+		var stopAuto = new[] { "[ STOP AUTO-PLAY ]", "[ ОСТАНОВИТЬ АВТО-ИГРУ ]", "[ STOP AUTO-GRĘ ]", "[ STOP AUTO-PLAY ]", "[ ЗУПИНИТИ АВТО-ГРУ ]" };
 		var search = new[] { "Chest searching", "Поиск сундука", "Wyszukiwanie skrzyń", "Truhensuche", "Пошук скрині" };
 		var hint = new[] { "Type chest location...", "Введите местоположение...", "Wpisz lokalizację skrzyni...", "Truhenstandort eingeben...", "Введіть місце розташування..." };
+		var chestDescription = new[] {
+		"Chest description",
+		"Описание сундука",
+		"Opis skrzyni",
+		"Truhenbeschreibung",
+		"Опис скрині"
+	};
+		var chestDescriptionHint = new[] {
+		"Type location and landmark...",
+		"Введите место и ориентир...",
+		"Wpisz miejsce i punkt orientacyjny...",
+		"Ort und Orientierungspunkt eingeben...",
+		"Введіть місце та орієнтир..."
+	};
 		var contr = new[] {
-		"Contribute a Chest",
-		"Добавить сундук в базу",
-		"Dodaj skrzynię do bazy",
-		"Truhe zur Datenbank hinzufügen",
-		"Додати скриню до бази"
+		"Add current configuration to database",
+		"Добавить текущую конфигурацию в базу",
+		"Dodaj bieżącą konfigurację do bazy",
+		"Aktuelle Konfiguration zur Datenbank hinzufügen",
+		"Додати поточну конфігурацію до бази"
 	};
 
+		var linksTitle = new[] {
+		"Slider links",
+		"СВЯЗИ ПОЛЗУНКОВ",
+		"Powiązania suwaków",
+		"Verbindungen der Schieber",
+		"ЗВ'ЯЗКИ ПОЛЗУНКІВ"
+		};
+
+		var linkTogether = new[] { "TOGETHER", "ВМЕСТЕ", "RAZEM", "ZUSAMMEN", "РАЗОМ" };
+		var linkOpposite = new[] { "OPPOSITE", "ПРОТИВ", "PRZECIW", "GEGEN", "ПРОТИВ" };
+		var linkNone = new[] { "NONE", "НЕТ", "BRAK", "LEER", "НІ" };
+
+		var linkTooltipDiag = new[] {
+		"Diagonal locked: slider always moves itself.",
+		"Диагональ заблокирована: ползунок всегда двигает сам себя.",
+		"Przekątna zablokowana: suwak zawsze porusza sam siebie.",
+		"Diagonale gesperrt: Schieber bewegt immer sich selbst.",
+		"Діагональ заблоковано: повзунок завжди рухає себе."
+		};
+
+		var linkTooltipClick = new[] {
+		"Click: NONE -> TOGETHER -> OPPOSITE",
+		"Клик: НЕТ -> ВМЕСТЕ -> ПРОТИВ",
+		"Klik: BRAK -> RAZEM -> PRZECIW",
+		"Klick: LEER -> ZUSAMMEN -> GEGEN",
+		"Клік: НІ -> РАЗОМ -> ПРОТИВ"
+		};
+
+		var resetCells = new[] { "Reset cells", "Сброс ячеек", "Reset komórek", "Zellen zurücksetzen", "Скинути комірки" };
+		var resetLinks = new[] { "Reset links", "Сброс связей", "Reset powiązań", "Verbindungen zurücksetzen", "Скинути зв'язки" };
+
+		var exactMatch = new[] {
+		"Exact match",
+		"Точное совпадение",
+		"Dokładne dopasowanie",
+		"Exakte Übereinstimmung",
+		"Точне співпадіння"
+	};
+		var partialMatch = new[] {
+		"Partial match",
+		"Частичное совпадение",
+		"Częściowe dopasowanie",
+		"Teilweises Übereinstimmen",
+		"Часткове співпадіння"
+	};
+		var emptyResults = new[] {
+		"Empty",
+		"Пусто",
+		"Puste",
+		"Leer",
+		"Порожньо"
+	};
 
 		// Массивы переводов для системных логов и ошибок
 		var errNoSolution = new[] {
@@ -270,9 +394,65 @@ public partial class MapManager : Node
 		var errBlindMode = new[] {
 		"ERROR: Process '{0}.exe' found, but window is hidden!\n[SYSTEM] Continuing in blind mode. Click on the game window now...",
 		"ОШИБКА: Процесс '{0}.exe' найден, но его окно скрыто!\n[СИСТЕМА] Продолжение в слепом режиме. Пожалуйста, кликните по окну игры сейчас...",
-		"BŁĄD: Proces '{0}.exe' został znaleziony, ale jego okno jest ukryte!\n[SYSTEM] Kontynuacja в trybie ślepym. Kliknij teraz na okno gry...",
+		"BŁĄD: Proces '{0}.exe' został znaleziony, ale jego okno jest ukryte!\n[SYSTEM] Kontynuacja w trybie ślepym. Kliknij teraz na okno gry...",
 		"FEHLER: Prozess '{0}.exe' gefunden, aber das Fenster ist ausgeblendet!\n[SYSTEM] Weiter im Blindmodus. Klicken Sie jetzt auf das Spielfenster...",
 		"ПОМИЛКА: Процес '{0}.exe' знайдено, але його вікно приховано!\n[СИСТЕМА] Продовження в сліпому режимі. Будь ласка, клікніть по вікну гри зараз..."
+	};
+
+		var logParsingError = new[] {
+		"Parsing error: {0}",
+		"Ошибка разбора: {0}",
+		"Błąd parsowania: {0}",
+		"Analysefehler: {0}",
+		"Помилка розбору: {0}"
+	};
+
+		var errRulesMissingColon = new[] {
+		"ERROR in command '{0}': Missing colon ':'",
+		"ОШИБКА в команде '{0}': отсутствует двоеточие ':'",
+		"BŁĄD w poleceniu '{0}': brakuje dwukropka ':'",
+		"FEHLER im Befehl '{0}': Doppelpunkt ':' fehlt",
+		"ПОМИЛКА в команді '{0}': відсутній двокрапка ':'"
+	};
+
+		var errUnknownLetter = new[] {
+		"ERROR: Unknown letter '{0}'.",
+		"ОШИБКА: Неизвестная буква '{0}'.",
+		"BŁĄD: Nieznana litera '{0}'.",
+		"FEHLER: Unbekannter Buchstabe '{0}'.",
+		"ПОМИЛКА: Невідома буква '{0}'."
+	};
+
+		var errEmptyRule = new[] {
+		"ERROR in block '{0}': Empty rule.",
+		"ОШИБКА в блоке '{0}': пустое правило.",
+		"BŁĄD w bloku '{0}': pusta reguła.",
+		"FEHLER im Block '{0}': leere Regel.",
+		"ПОМИЛКА в блоці '{0}': порожнє правило."
+	};
+
+		var errInvalidCell = new[] {
+		"ERROR: Invalid cell '{0}' in rule '{1}'.",
+		"ОШИБКА: Неверная ячейка '{0}' в правиле '{1}'.",
+		"BŁĄD: Nieprawidłowa komórka '{0}' w regule '{1}'.",
+		"FEHLER: Ungültige Zelle '{0}' in Regel '{1}'.",
+		"ПОМИЛКА: Неправильна комірка '{0}' у правилі '{1}'."
+	};
+
+		var errInvalidSign = new[] {
+		"ERROR: Invalid sign '{0}' in rule '{1}'.",
+		"ОШИБКА: Неверный знак '{0}' в правиле '{1}'.",
+		"BŁĄD: Nieprawidłowy znak '{0}' w regule '{1}'.",
+		"FEHLER: Ungültiges Zeichen '{0}' in Regel '{1}'.",
+		"ПОМИЛКА: Неправильний знак '{0}' у правилі '{1}'."
+	};
+
+		var matrixPinLabel = new[] {
+		"P",
+		"П",
+		"P",
+		"P",
+		"П"
 	};
 
 		// Перевод заголовка успешно сгенерированного плана взлома
@@ -297,9 +477,27 @@ public partial class MapManager : Node
 			tx.AddMessage("KEY_AUTOPLAY", auto[i]);
 			tx.AddMessage("KEY_SEARCH_TITLE", search[i]);
 			tx.AddMessage("KEY_SEARCH_HINT", hint[i]);
+			tx.AddMessage("KEY_CHEST_DESCRIPTION", chestDescription[i]);
+			tx.AddMessage("KEY_CHEST_DESCRIPTION_HINT", chestDescriptionHint[i]);
 			tx.AddMessage("KEY_CONTRIBUTE", contr[i]);
+			tx.AddMessage("KEY_EXACT_MATCH", exactMatch[i]);
+			tx.AddMessage("KEY_PARTIAL_MATCH", partialMatch[i]);
+			// Link UI keys
+			tx.AddMessage("KEY_LINKS_TITLE", linksTitle[i]);
+			tx.AddMessage("KEY_LINK_TOGETHER", linkTogether[i]);
+			tx.AddMessage("KEY_LINK_OPPOSITE", linkOpposite[i]);
+			tx.AddMessage("KEY_LINK_NONE", linkNone[i]);
+			tx.AddMessage("KEY_LINK_TOOLTIP_DIAG", linkTooltipDiag[i]);
+			tx.AddMessage("KEY_LINK_TOOLTIP_CLICK", linkTooltipClick[i]);
+			tx.AddMessage("KEY_RESET_CELLS", resetCells[i]);
+			tx.AddMessage("KEY_RESET_LINKS", resetLinks[i]);
+			tx.AddMessage("KEY_STOP_AUTOPLAY", stopAuto[i]);
+			// Aliases used in UI scene for full/almost boxes
+			tx.AddMessage("KEY_FULL_CORRECT", exactMatch[i]);
+			tx.AddMessage("KEY_ALMOST_CORRECT", partialMatch[i]);
+			tx.AddMessage("KEY_EMPTY_RESULTS", emptyResults[i]);
 
-			// 🔥 ИСПРАВЛЕНО: Строку Translation tx = new Translation(); мы отсюда УБРАЛИ.
+			// 🔥 ИСПРАВЛЕНО: Строку Translation tx = new Translation(); мы отсюда УДАЛИЛИ.
 			// Просто дописываем новые сообщения в уже существующий объект tx:
 			tx.AddMessage("ERR_NO_SOLUTION", errNoSolution[i]);
 			tx.AddMessage("ERR_RULES_EMPTY", errRulesEmpty[i]);
@@ -322,6 +520,13 @@ public partial class MapManager : Node
 			tx.AddMessage("LOG_WINDOW_FOCUSED", logWindowFocused[i]);
 			tx.AddMessage("ERR_BLIND_MODE", errBlindMode[i]);
 			tx.AddMessage("LOG_PLAN_GENERATED", logPlanGenerated[i]);
+			tx.AddMessage("ERR_PARSING", logParsingError[i]);
+			tx.AddMessage("ERR_RULES_MISSING_COLON", errRulesMissingColon[i]);
+			tx.AddMessage("ERR_UNKNOWN_LETTER", errUnknownLetter[i]);
+			tx.AddMessage("ERR_EMPTY_RULE", errEmptyRule[i]);
+			tx.AddMessage("ERR_INVALID_CELL", errInvalidCell[i]);
+			tx.AddMessage("ERR_INVALID_SIGN", errInvalidSign[i]);
+			tx.AddMessage("KEY_MATRIX_PIN_LABEL", matrixPinLabel[i]);
 
 			// Эта строчка у вас тоже уже была в самом конце оригинального цикла, 
 			// поэтому вторую такую же из моего куска кода нужно удалить:
@@ -356,6 +561,7 @@ public partial class MapManager : Node
 
 		// Переключаем системную локализацию Godot на сохраненный язык
 		TranslationServer.SetLocale(lang);
+		RefreshPuzzleSolverTranslations();
 	}
 
 	private void OnLanguageSelected(long index)
@@ -373,11 +579,60 @@ public partial class MapManager : Node
 		// 1. Мгновенно меняем язык интерфейса во всей программе
 		TranslationServer.SetLocale(lang);
 
+		// Обновляем тексты всех статических элементов UI сразу
+		ApplyTranslationsToScene();
+		RefreshPuzzleSolverTranslations();
+
 		// 2. ЗАПИСЫВАЕМ ВЫБОР В SETTINGS.INI (Автосохранение)
 		var config = new ConfigFile();
 		config.Load(SETTINGS_INI_PATH); // Подгружаем текущие настройки (например, тайминги автокликера)
 		config.SetValue("General", "language", lang); // Добавляем или перезаписываем язык
 		config.Save(SETTINGS_INI_PATH); // Сохраняем файл на диск
+	}
+
+	private void ApplyTranslationsToScene()
+	{
+		// Left panel
+		var titleLabel = GetNode<Label>("../VBoxContainer/Label");
+		titleLabel.Text = TranslationServer.Translate("KEY_TITLE");
+
+		var cellsLabel = GetNode<Label>("../VBoxContainer/HBoxContainer/Label");
+		cellsLabel.Text = TranslationServer.Translate("KEY_CELLS");
+
+		var initialLabel = GetNode<Label>("../VBoxContainer/Label3");
+		initialLabel.Text = TranslationServer.Translate("KEY_INITIAL");
+
+		var rulesHintLabel = GetNode<Label>("../VBoxContainer/HBoxContainer2/Label2");
+		rulesHintLabel.Text = TranslationServer.Translate("KEY_RULES_HINT");
+
+		var calcButton = GetNode<Button>("../VBoxContainer/Button");
+		calcButton.Text = TranslationServer.Translate("KEY_CALCULATE");
+
+		var delayLabel = GetNode<Label>("../VBoxContainer/Label4");
+		delayLabel.Text = TranslationServer.Translate("KEY_DELAY");
+
+		var autoButton = GetNode<Button>("../VBoxContainer/Button2");
+		autoButton.Text = TranslationServer.Translate("KEY_AUTOPLAY");
+
+		// Right panel
+		_labelFull.Text = TranslationServer.Translate("KEY_FULL_CORRECT");
+		_labelAlmost.Text = TranslationServer.Translate("KEY_ALMOST_CORRECT");
+
+		_chestDescriptionInput.PlaceholderText = TranslationServer.Translate("KEY_CHEST_DESCRIPTION_HINT");
+		_chestDescriptionInput.Text = _chestDescriptionInput.Text; // keep user text
+		_contributeButton.Text = TranslationServer.Translate("KEY_CONTRIBUTE");
+
+		_searchField.PlaceholderText = TranslationServer.Translate("KEY_SEARCH_HINT");
+
+		// Reset buttons (ensure they reflect translations)
+		_resetButton.Text = TranslationServer.Translate("KEY_RESET_CELLS");
+		_resetLinksButton.Text = TranslationServer.Translate("KEY_RESET_LINKS");
+	}
+
+	private void RefreshPuzzleSolverTranslations()
+	{
+		var rootNode = GetTree().Root.GetChild(0) as PuzzleSolver;
+		rootNode?.RefreshLinkMatrixTranslations();
 	}
 
 	private void OnHelpButtonPressed()
@@ -389,6 +644,43 @@ public partial class MapManager : Node
 		_helpWindow.Title = _helpLoc[currentLocale].Item1;
 		_helpWindow.DialogText = _helpLoc[currentLocale].Item2;
 		_helpWindow.PopupCentered(); // Показываем окно по центру экрана
+	}
+
+	private void OnContributeButtonPressed()
+	{
+		string chestDescription = _chestDescriptionInput.Text.Trim();
+		int cellCount = (int)_cellCountInput.Value;
+		string startPositions = BuildCurrentStartPositions(cellCount);
+		string rules = _rulesInput.Text.Trim();
+
+		string url = CONTRIBUTE_FORM_URL +
+			"?usp=pp_url" +
+			BuildFormParameter(FORM_ENTRY_CHEST_DESCRIPTION, chestDescription) +
+			BuildFormParameter(FORM_ENTRY_CELL_COUNT, cellCount.ToString()) +
+			BuildFormParameter(FORM_ENTRY_START_POS, startPositions) +
+			BuildFormParameter(FORM_ENTRY_RULES, rules);
+
+		OS.ShellOpen(url);
+	}
+
+	private string BuildCurrentStartPositions(int cellCount)
+	{
+		List<string> values = new List<string>();
+		int activeCount = Math.Clamp(cellCount, 0, _mainSpinBoxes.Length);
+
+		for (int i = 0; i < activeCount; i++)
+		{
+			values.Add(((int)_mainSpinBoxes[i].Value).ToString());
+		}
+
+		return string.Join(",", values);
+	}
+
+	private string BuildFormParameter(string key, string value)
+	{
+		if (string.IsNullOrWhiteSpace(value)) return "";
+
+		return $"&{key}={Uri.EscapeDataString(value)}";
 	}
 
 
@@ -496,8 +788,134 @@ public partial class MapManager : Node
 			}
 		}
 
+		// Автосортировка базы по выставленным начальным положениям
+		_database.Sort(CompareChestConfigsByStartPos);
+
 		GD.Print($"[DATABASE SUCCESS] Smart-loaded {_database.Count} chests from chests.ini!");
 		FilterAndGenerateButtons("");
+	}
+
+	private static int CompareChestConfigsByStartPos(ChestConfig a, ChestConfig b)
+	{
+		int[] aPositions = ParseStartPositions(a.StartPos);
+		int[] bPositions = ParseStartPositions(b.StartPos);
+
+		int countComparison = a.CellCount.CompareTo(b.CellCount);
+		if (countComparison != 0)
+		{
+			return countComparison;
+		}
+
+		int length = Math.Min(aPositions.Length, bPositions.Length);
+		for (int i = 0; i < length; i++)
+		{
+			if (aPositions[i] != bPositions[i])
+			{
+				return aPositions[i].CompareTo(bPositions[i]);
+			}
+		}
+
+		if (aPositions.Length != bPositions.Length)
+		{
+			return aPositions.Length.CompareTo(bPositions.Length);
+		}
+
+		return string.Compare(a.DisplayName, b.DisplayName, StringComparison.OrdinalIgnoreCase);
+	}
+
+	private static int CompareChestMatchByStartPos(ChestConfig a, ChestConfig b, int[] currentStartPositions)
+	{
+		int scoreA = GetStartPositionMatchScore(currentStartPositions, ParseStartPositions(a.StartPos));
+		int scoreB = GetStartPositionMatchScore(currentStartPositions, ParseStartPositions(b.StartPos));
+
+		int scoreDiff = scoreB.CompareTo(scoreA);
+		if (scoreDiff != 0)
+		{
+			return scoreDiff;
+		}
+
+		return CompareChestConfigsByStartPos(a, b);
+	}
+
+	private static int GetStartPositionMatchScore(int[] current, int[] target)
+	{
+		if (current == null || target == null || current.Length == 0 || target.Length == 0)
+		{
+			return 0;
+		}
+
+		int score = 0;
+		int maxIndex = Math.Min(current.Length, target.Length);
+
+		for (int i = 0; i < maxIndex; i++)
+		{
+			if (current[i] == target[i])
+			{
+				score++;
+			}
+		}
+
+		return score;
+	}
+
+	private int[] GetCurrentStartPositions(int cellCount)
+	{
+		int activeCount = Math.Clamp(cellCount, 0, _mainSpinBoxes.Length);
+		int[] result = new int[activeCount];
+
+		for (int i = 0; i < activeCount; i++)
+		{
+			result[i] = (int)_mainSpinBoxes[i].Value;
+		}
+
+		return result;
+	}
+
+	private static bool IsExactStartPositionMatch(int[] current, int[] target)
+	{
+		if (current == null || target == null)
+		{
+			return false;
+		}
+
+		if (current.Length != target.Length)
+		{
+			return false;
+		}
+
+		for (int i = 0; i < current.Length; i++)
+		{
+			if (current[i] != target[i])
+			{
+				return false;
+			}
+		}
+
+		return current.Length > 0;
+	}
+
+	private static int[] ParseStartPositions(string startPos)
+	{
+		if (string.IsNullOrWhiteSpace(startPos))
+		{
+			return Array.Empty<int>();
+		}
+
+		string[] parts = startPos.Split(',');
+		var result = new List<int>(parts.Length);
+		foreach (string part in parts)
+		{
+			if (int.TryParse(part.Trim(), out int value))
+			{
+				result.Add(value);
+			}
+			else
+			{
+				result.Add(int.MaxValue);
+			}
+		}
+
+		return result.ToArray();
 	}
 
 	private void OnSearchTextChanged(string newText)
@@ -505,14 +923,25 @@ public partial class MapManager : Node
 		FilterAndGenerateButtons(newText);
 	}
 
+	private void OnCellCountValueChanged(double value)
+	{
+		FilterAndGenerateButtons(_searchField.Text);
+	}
+
+	private void OnStartPositionValueChanged(double value)
+	{
+		FilterAndGenerateButtons(_searchField.Text);
+	}
+
 	private void FilterAndGenerateButtons(string query)
 	{
-		foreach (Node child in _chestGrid.GetChildren())
-		{
-			child.QueueFree();
-		}
+
 
 		string cleanQuery = query.Trim().ToLower();
+
+		int requiredCellCount = (int)_cellCountInput.Value;
+		int[] currentStartPositions = GetCurrentStartPositions(requiredCellCount);
+		var matchingChests = new List<ChestConfig>();
 
 		foreach (ChestConfig chest in _database)
 		{
@@ -530,19 +959,105 @@ public partial class MapManager : Node
 				}
 			}
 
+			if (requiredCellCount > 0 && chest.CellCount != requiredCellCount)
+			{
+				isMatch = false;
+			}
+
 			if (isMatch)
+			{
+				matchingChests.Add(chest);
+			}
+		}
+
+		var exactMatches = new List<ChestConfig>();
+		var partialMatches = new List<ChestConfig>();
+
+		foreach (ChestConfig chest in matchingChests)
+		{
+			int[] chestStartPositions = ParseStartPositions(chest.StartPos);
+			if (IsExactStartPositionMatch(currentStartPositions, chestStartPositions))
+			{
+				exactMatches.Add(chest);
+			}
+			else
+			{
+				partialMatches.Add(chest);
+			}
+		}
+
+		GD.Print($"[FILTER] query='{cleanQuery}' requiredCells={requiredCellCount} matching={matchingChests.Count} exact={exactMatches.Count} partial={partialMatches.Count}");
+
+		// Clear both grid containers
+		foreach (Node child in _chestGridFull.GetChildren())
+		{
+			child.QueueFree();
+		}
+		foreach (Node child in _chestGridAlmost.GetChildren())
+		{
+			child.QueueFree();
+		}
+
+		exactMatches.Sort(CompareChestConfigsByStartPos);
+		partialMatches.Sort((a, b) => CompareChestMatchByStartPos(a, b, currentStartPositions));
+
+		// Update header labels: full/empty depending on existence
+		if (exactMatches.Count > 0)
+			_labelFull.Text = TranslationServer.Translate("KEY_FULL_CORRECT");
+		else
+			_labelFull.Text = TranslationServer.Translate("KEY_EMPTY_RESULTS");
+
+		_labelAlmost.Text = TranslationServer.Translate("KEY_ALMOST_CORRECT");
+
+		// Populate full grid with exact matches
+		if (exactMatches.Count > 0)
+		{
+			foreach (ChestConfig chest in exactMatches)
 			{
 				Button btn = new Button();
 				btn.Text = chest.DisplayName;
 				btn.CustomMinimumSize = new Vector2(190, 50);
 				btn.ClipText = true;
-				btn.AutowrapMode = TextServer.AutowrapMode.WordSmart; // Перенос строк на кнопках
+				btn.AutowrapMode = TextServer.AutowrapMode.WordSmart;
 				btn.AddThemeColorOverride("font_color", new Color(0.9f, 0.9f, 0.7f));
 
 				btn.Pressed += () => OnChestButtonClicked(chest);
-
-				_chestGrid.AddChild(btn);
+				_chestGridFull.AddChild(btn);
 			}
+		}
+		else
+		{
+			// Optionally show an empty label inside the full grid
+			Label emptyLabel = new Label();
+			emptyLabel.Text = TranslationServer.Translate("KEY_EMPTY_RESULTS");
+			emptyLabel.CustomMinimumSize = new Vector2(190, 30);
+			emptyLabel.AddThemeColorOverride("font_color", new Color(0.7f, 0.7f, 0.7f));
+			_chestGridFull.AddChild(emptyLabel);
+		}
+
+		// Populate almost grid with partial matches
+		if (partialMatches.Count > 0)
+		{
+			foreach (ChestConfig chest in partialMatches)
+			{
+				Button btn = new Button();
+				btn.Text = chest.DisplayName;
+				btn.CustomMinimumSize = new Vector2(190, 50);
+				btn.ClipText = true;
+				btn.AutowrapMode = TextServer.AutowrapMode.WordSmart;
+				btn.AddThemeColorOverride("font_color", new Color(0.9f, 0.9f, 0.7f));
+
+				btn.Pressed += () => OnChestButtonClicked(chest);
+				_chestGridAlmost.AddChild(btn);
+			}
+		}
+		else
+		{
+			Label emptyLabel2 = new Label();
+			emptyLabel2.Text = TranslationServer.Translate("KEY_EMPTY_RESULTS");
+			emptyLabel2.CustomMinimumSize = new Vector2(190, 30);
+			emptyLabel2.AddThemeColorOverride("font_color", new Color(0.7f, 0.7f, 0.7f));
+			_chestGridAlmost.AddChild(emptyLabel2);
 		}
 	}
 
@@ -569,9 +1084,7 @@ public partial class MapManager : Node
 		rootNode.Call("UpdateStartPos", chest.CellCount, chest.StartPos);
 		//GD.Print(chest.StartPos);
 
-		_rulesInput.Text = chest.Rules;
-
-		string logText = "Please look at your screen and fill current values manually.";
+		rootNode.Call("LoadRulesFromDatabase", chest.Rules);
 
 		// Вместо жесткого текста FULL_DATA_LOADED и INCOMPLETE DATA:
 		if (!string.IsNullOrEmpty(chest.StartPos) && chest.StartPos.ToLower() != "none")
